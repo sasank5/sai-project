@@ -5,3 +5,4 @@ numpy
 tf-keras>=2.13
 python-dotenv
 werkzeug
+Pillow
