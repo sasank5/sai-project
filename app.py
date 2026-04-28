@@ -211,69 +211,52 @@ def login_page():
 def camera_page():
     st.title("Real-time Monitoring")
 
-    run          = st.checkbox("Enable Live Camera Feed")
-    frame_window = st.image([])
-    status_box   = st.empty()
-
-    if "last_alert"   not in st.session_state:
-        st.session_state.last_alert   = datetime.now() - timedelta(seconds=60)
-    if "last_emotion" not in st.session_state:
-        st.session_state.last_emotion = None
-
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        st.error("Could not open camera. Check that your webcam is connected.")
+    uploaded = st.file_uploader("Upload a video or image", type=["mp4", "avi", "jpg", "jpeg", "png"])
+    if not uploaded:
         return
 
-    try:
-        while run:
+    # Save to temp file
+    import tempfile
+    suffix = os.path.splitext(uploaded.name)[1]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded.read())
+        tmp_path = tmp.name
+
+    # Image
+    if suffix.lower() in (".jpg", ".jpeg", ".png"):
+        frame = cv2.imdecode(np.frombuffer(open(tmp_path, "rb").read(), np.uint8), cv2.IMREAD_COLOR)
+        _analyze_and_display(frame)
+
+    # Video
+    else:
+        cap = cv2.VideoCapture(tmp_path)
+        stframe = st.image([])
+        while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                st.warning("Camera read failed.")
                 break
+            _analyze_and_display(frame, stframe)
+        cap.release()
 
-            small_frame = cv2.resize(frame, (0, 0), fx=0.4, fy=0.4)
+def _analyze_and_display(frame, placeholder=None):
+    try:
+        results = DeepFace.analyze(frame, actions=["emotion"], enforce_detection=False, silent=True)
+        emotion = results[0]["dominant_emotion"]
+        color = (0, 0, 255) if emotion in ("angry", "fear") else (0, 255, 0)
+        cv2.putText(frame, f"{emotion.upper()}", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        log_event(emotion)
+        if emotion in ("angry", "fear"):
+            path = os.path.join(INTRUDER_DIR, f"alert_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
+            cv2.imwrite(path, frame)
+            send_email_async(path, emotion)
+            st.error(f"Alert: {emotion} detected!")
+    except Exception as e:
+        st.warning(f"Detection error: {e}")
 
-            emotion = "unknown"
-            try:
-                results = DeepFace.analyze(
-                    small_frame,
-                    actions=["emotion"],
-                    enforce_detection=False,
-                    silent=True
-                )
-                emotion = results[0]["dominant_emotion"]
-            except Exception as e:
-                status_box.warning(f"Detection error: {e}")
-
-            # Overlay
-            color = (0, 0, 255) if emotion in ("angry", "fear") else (0, 255, 0)
-            cv2.putText(
-                frame, f"Status: {emotion.upper()}",
-                (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2
-            )
-
-            # Log only on emotion change (prevents flooding the DB)
-            if emotion != st.session_state.last_emotion:
-                log_event(emotion)
-                st.session_state.last_emotion = emotion
-
-            # Alert logic
-            if emotion in ("angry", "fear"):
-                now = datetime.now()
-                if (now - st.session_state.last_alert).total_seconds() > 30:
-                    filename = f"alert_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
-                    path     = os.path.join(INTRUDER_DIR, filename)
-                    cv2.imwrite(path, frame)
-                    send_email_async(path, emotion)          # non-blocking
-                    st.session_state.last_alert = now
-                    status_box.error(f"Alert sent at {now.strftime('%H:%M:%S')} — {emotion}")
-
-            frame_window.image(frame, channels="BGR")
-
-    finally:
-        cap.release()   # always release, even if an exception occurs
-
+    if placeholder:
+        placeholder.image(frame, channels="BGR")
+    else:
+        st.image(frame, channels="BGR")
 # -----------------------
 # PAGE: LOGS DASHBOARD
 # -----------------------
