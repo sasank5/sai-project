@@ -1,7 +1,7 @@
 streamlit
 opencv-python-headless
 deepface
-tf-keras
-tensorflow-cpu
-numpy<2.0.0
+numpy
 werkzeug
+python-dotenv
+tf-keras
