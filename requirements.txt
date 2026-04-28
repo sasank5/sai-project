@@ -1,6 +1,7 @@
-dlib-bin
-streamlit
-opencv-python-headless
-deepface
+streamlit==1.25.0
+opencv-python-headless==4.8.0.74
+deepface==0.0.79
 tf-keras
-tensorflow-cpu  # Using the CPU version saves significant space/memory
+tensorflow-cpu
+numpy<2.0.0
+werkzeug
