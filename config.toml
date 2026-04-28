@@ -1,0 +1,10 @@
+[server]
+headless = true
+port = 8501
+maxUploadSize = 200
+
+[logger]
+level = "error"
+
+[client]
+showErrorDetails = false
