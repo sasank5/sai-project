@@ -1,7 +1,6 @@
+dlib-bin
 streamlit
-opencv-python
+opencv-python-headless
 deepface
-numpy
-werkzeug
-python-dotenv
 tf-keras
+tensorflow-cpu  # Using the CPU version saves significant space/memory
