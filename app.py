@@ -16,9 +16,9 @@ from dotenv import load_dotenv
 # -----------------------
 load_dotenv()
 
-EMAIL_SENDER   = os.getenv("EMAIL_SENDER", "your_email@gmail.com")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "your_app_password")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "receiver@gmail.com")
+EMAIL_SENDER   = os.getenv("EMAIL_SENDER", "aa@gmail.com")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "aa@11")
+EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "chvj8121@gmail.com")
 
 BASE_DIR      = os.getcwd()
 DB_PATH       = os.path.join(BASE_DIR, "security.db")
