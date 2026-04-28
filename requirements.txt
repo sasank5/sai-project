@@ -1,5 +1,7 @@
-streamlit
+streamlit>=1.28.0
 deepface==0.0.79
 opencv-python-headless==4.8.1.78
 numpy
-tf-keras
+tf-keras>=2.13
+python-dotenv
+werkzeug
