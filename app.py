@@ -1,400 +1,277 @@
-import streamlit as st
-import cv2
 import os
+import cv2
 import sqlite3
-import threading
-import smtplib
+import face_recognition
 import numpy as np
-from deepface import DeepFace
+import smtplib
 from email.message import EmailMessage
-from datetime import datetime, timedelta
+from datetime import datetime
+from flask import Flask, render_template, Response, request, redirect, session
 from werkzeug.security import generate_password_hash, check_password_hash
-from dotenv import load_dotenv
 
 # -----------------------
-# CONFIG
+# EMAIL CONFIG
 # -----------------------
-load_dotenv()
+EMAIL_SENDER = "srisaisasanksadineni@gmail.com"
+EMAIL_PASSWORD = "ehlyshxyeyspsucc"
+EMAIL_RECEIVER = "srisaisasanksadineni@gmail.com"
 
-EMAIL_SENDER   = os.getenv("EMAIL_SENDER", "aa@gmail.com")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "aa@11")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "chvj8121@gmail.com")
+def send_email_with_image(image_path):
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = "🚨 Intruder Alert!"
+        msg["From"] = EMAIL_SENDER
+        msg["To"] = EMAIL_RECEIVER
+        msg.set_content("Unknown person detected! Image attached.")
 
-BASE_DIR      = os.getcwd()
-DB_PATH       = os.path.join(BASE_DIR, "security.db")
-INTRUDER_DIR  = os.path.join(BASE_DIR, "intruders")
-MAX_LOGIN_ATTEMPTS = 5
-SESSION_TIMEOUT_MINUTES = 30
-LOG_RETENTION_DAYS = 7   # days to keep intruder images
+        with open(image_path, "rb") as f:
+            msg.add_attachment(
+                f.read(),
+                maintype="image",
+                subtype="jpeg",
+                filename=os.path.basename(image_path)
+            )
 
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            smtp.send_message(msg)
+
+        print("📧 Email sent!")
+
+    except Exception as e:
+        print("❌ Email failed:", e)
+
+# -----------------------
+# FLASK SETUP
+# -----------------------
+app = Flask(__name__)
+app.secret_key = "supersecretkey"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "security.db")
+KNOWN_DIR = os.path.join(BASE_DIR, "known_faces")
+INTRUDER_DIR = os.path.join(BASE_DIR, "intruders")
+
+os.makedirs(KNOWN_DIR, exist_ok=True)
 os.makedirs(INTRUDER_DIR, exist_ok=True)
 
 # -----------------------
 # DATABASE
 # -----------------------
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS admin (
-                id       INTEGER PRIMARY KEY,
-                username TEXT UNIQUE,
-                password TEXT
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS logs (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                emotion TEXT,
-                time    TEXT
-            )
-        """)
-        # Seed default admin only if not present
-        if not c.execute("SELECT 1 FROM admin WHERE username='admin'").fetchone():
-            c.execute(
-                "INSERT INTO admin (username, password) VALUES (?, ?)",
-                ("admin", generate_password_hash("admin123"))
-            )
-        conn.commit()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
 
+    c.execute('''CREATE TABLE IF NOT EXISTS admin (
+                    id INTEGER PRIMARY KEY,
+                    username TEXT UNIQUE,
+                    password TEXT)''')
 
-def log_event(emotion: str):
-    """Insert a single log row. Called only on emotion change."""
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO logs (emotion, time) VALUES (?, ?)",
-                (emotion, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            )
-            conn.commit()
-    except Exception as e:
-        st.warning(f"Log error: {e}")
+    c.execute('''CREATE TABLE IF NOT EXISTS logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT,
+                    time TEXT)''')
 
+    if not c.execute("SELECT * FROM admin WHERE username='admin'").fetchone():
+        c.execute("INSERT INTO admin VALUES (1, ?, ?)",
+                  ("admin", generate_password_hash("admin123")))
 
-def get_logs(limit: int = 100):
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute("SELECT emotion, time FROM logs ORDER BY id DESC LIMIT ?", (limit,))
-        return c.fetchall()
+    conn.commit()
+    conn.close()
 
-
-def verify_admin(username: str, password: str):
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT password FROM admin WHERE username=?", (username,)
-        ).fetchone()
-    return row and check_password_hash(row[0], password)
-
-
-def change_password(username: str, new_password: str):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "UPDATE admin SET password=? WHERE username=?",
-            (generate_password_hash(new_password), username)
-        )
-        conn.commit()
+init_db()
 
 # -----------------------
-# EMAIL (threaded)
+# LOAD FACES
 # -----------------------
-def send_email_async(image_path: str, emotion: str):
-    """Fire-and-forget email in a daemon thread to avoid blocking the camera loop."""
-    def _send():
-        try:
-            msg = EmailMessage()
-            msg["Subject"] = f"Security Alert: {emotion.upper()} Detected"
-            msg["From"]    = EMAIL_SENDER
-            msg["To"]      = EMAIL_RECEIVER
-            msg.set_content(
-                f"Anomalous emotion '{emotion}' detected at "
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}."
-            )
-            with open(image_path, "rb") as f:
-                msg.add_attachment(
-                    f.read(),
-                    maintype="image",
-                    subtype="jpeg",
-                    filename=os.path.basename(image_path)
-                )
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-                smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
-                smtp.send_message(msg)
-        except Exception as e:
-            # Logged to console; st.error can't be called from a background thread
-            print(f"[Email error] {e}")
+def load_faces():
+    encodings = []
+    names = []
 
-    threading.Thread(target=_send, daemon=True).start()
+    for file in os.listdir(KNOWN_DIR):
+        if file.lower().endswith((".jpg", ".png", ".jpeg")):
+            path = os.path.join(KNOWN_DIR, file)
+            img = face_recognition.load_image_file(path)
+            enc = face_recognition.face_encodings(img)
+
+            if enc:
+                encodings.append(enc[0])
+                names.append(os.path.splitext(file)[0])
+
+    return encodings, names
+
+known_encodings, known_names = load_faces()
 
 # -----------------------
-# IMAGE RETENTION CLEANUP
+# LOGIN REQUIRED
 # -----------------------
-def cleanup_old_images():
-    """Delete intruder images older than LOG_RETENTION_DAYS."""
-    cutoff = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
-    for fname in os.listdir(INTRUDER_DIR):
-        fpath = os.path.join(INTRUDER_DIR, fname)
-        try:
-            mtime = datetime.fromtimestamp(os.path.getmtime(fpath))
-            if mtime < cutoff:
-                os.remove(fpath)
-        except Exception:
-            pass
+def login_required(func):
+    def wrapper(*args, **kwargs):
+        if "user" not in session:
+            return redirect("/login")
+        return func(*args, **kwargs)
+    wrapper.__name__ = func.__name__
+    return wrapper
 
 # -----------------------
-# SESSION HELPERS
+# CAMERA SETUP
 # -----------------------
-def check_session_timeout():
-    """Auto-logout after SESSION_TIMEOUT_MINUTES of inactivity."""
-    last = st.session_state.get("last_activity")
-    if last and (datetime.now() - last) > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
-        st.session_state.logged_in = False
-        st.warning("Session timed out. Please log in again.")
-        st.rerun()
-    st.session_state.last_activity = datetime.now()
+camera = cv2.VideoCapture(0) 
+camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-
-def is_strong_password(pwd: str) -> bool:
-    return len(pwd) >= 8 and any(c.isdigit() for c in pwd) and any(c.isalpha() for c in pwd)
+last_alert_time = None
+last_logged_name = None
 
 # -----------------------
-# PAGE: LOGIN
+# CAMERA STREAM (SMOOTH)
 # -----------------------
-def login_page():
-    st.title("Security System Login")
+def generate_frames():
+    global last_alert_time, last_logged_name
+    process_this_frame = True
+    last_faces = []
 
-    # Initialise attempt counter
-    if "fail_count" not in st.session_state:
-        st.session_state.fail_count = 0
-    if "locked_until" not in st.session_state:
-        st.session_state.locked_until = None
+    while True:
+        success, frame = camera.read()
+        if not success:
+            continue  # Keep trying if frame not captured
 
-    # Lockout check
-    if st.session_state.locked_until:
-        remaining = (st.session_state.locked_until - datetime.now()).seconds
-        if datetime.now() < st.session_state.locked_until:
-            st.error(f"Too many failed attempts. Try again in {remaining}s.")
-            return
-        else:
-            st.session_state.locked_until = None
-            st.session_state.fail_count = 0
+        # Reduce size for faster processing
+        small_frame = cv2.resize(frame, (0, 0), fx=0.4, fy=0.4)
+        rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-    with st.form("login_form"):
-        user   = st.text_input("Username")
-        pwd    = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Login")   # FIXED: correct method name
+        names = []
+        boxes = []
 
-        if submit:
-            if verify_admin(user, pwd):
-                st.session_state.logged_in     = True
-                st.session_state.username      = user
-                st.session_state.last_activity = datetime.now()
-                st.session_state.fail_count    = 0
-                # Warn if still using default password
-                if pwd == "admin123":
-                    st.warning(
-                        "You are using the default password. "
-                        "Please change it in Settings."
+        if process_this_frame:
+            face_locations = face_recognition.face_locations(rgb_small)
+            face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
+
+            for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+                matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=0.5)
+                distances = face_recognition.face_distance(known_encodings, face_encoding)
+
+                name = "Unknown"
+                if len(distances) > 0:
+                    best_index = np.argmin(distances)
+                    if matches[best_index] and distances[best_index] < 0.45:
+                        name = known_names[best_index]
+
+                names.append(name)
+                boxes.append((top, right, bottom, left))
+
+                # ALERT
+                if name == "Unknown":
+                    now = datetime.now()
+                    if not last_alert_time or (now - last_alert_time).seconds > 15:
+                        filename = f"intruder_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
+                        filepath = os.path.join(INTRUDER_DIR, filename)
+                        cv2.imwrite(filepath, frame)
+                        send_email_with_image(filepath)
+                        last_alert_time = now
+
+                # LOGGING
+                if name != last_logged_name:
+                    conn = sqlite3.connect(DB_PATH)
+                    c = conn.cursor()
+                    c.execute(
+                        "INSERT INTO logs (name, time) VALUES (?, ?)",
+                        (name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                     )
-                st.rerun()
-            else:
-                st.session_state.fail_count += 1
-                remaining_attempts = MAX_LOGIN_ATTEMPTS - st.session_state.fail_count
-                if st.session_state.fail_count >= MAX_LOGIN_ATTEMPTS:
-                    st.session_state.locked_until = datetime.now() + timedelta(minutes=5)
-                    st.error("Account locked for 5 minutes due to too many failed attempts.")
-                else:
-                    st.error(f"Invalid credentials. {remaining_attempts} attempt(s) remaining.")
+                    conn.commit()
+                    conn.close()
+                    last_logged_name = name
+
+            last_faces = list(zip(boxes, names))
+
+        process_this_frame = not process_this_frame
+
+        # Draw boxes
+        for (top, right, bottom, left), name in last_faces:
+            top = int(top * 2.5)
+            right = int(right * 2.5)
+            bottom = int(bottom * 2.5)
+            left = int(left * 2.5)
+
+            color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+            cv2.putText(frame, name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        ret, buffer = cv2.imencode('.jpg', frame)
+        frame_bytes = buffer.tobytes()
+
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 # -----------------------
-# PAGE: CAMERA FEED
+# ROUTES
 # -----------------------
+@app.route('/login', methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        username = request.form.get("username")
+        password = request.form.get("password")
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT password FROM admin WHERE username=?", (username,))
+        user = c.fetchone()
+        conn.close()
+
+        if user and check_password_hash(user[0], password):
+            session["user"] = username
+            return redirect("/")
+        else:
+            error = "❌ Invalid Username or Password"
+
+    return render_template("login.html", error=error)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
+
+@app.route('/')
+@login_required
+def home():
+    return render_template("index.html")
+
+@app.route('/register', methods=["GET", "POST"])
+@login_required
+def register():
+    global known_encodings, known_names
+    if request.method == "POST":
+        name = request.form["name"]
+        photo = request.files["photo"]
+        if name and photo:
+            photo.save(os.path.join(KNOWN_DIR, f"{name}.jpg"))
+            known_encodings, known_names = load_faces()
+    return render_template("register.html")
+
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name, time FROM logs ORDER BY id DESC")
+    logs = c.fetchall()
+    conn.close()
+    return render_template("dashboard.html", logs=logs)
+
+@app.route('/camera')
+@login_required
 def camera_page():
-    st.title("Real-time Monitoring")
+    return render_template("camera.html")
 
-    uploaded = st.file_uploader("Upload a video or image", type=["mp4", "avi", "jpg", "jpeg", "png"])
-    if not uploaded:
-        return
-
-    # Save to temp file
-    import tempfile
-    suffix = os.path.splitext(uploaded.name)[1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded.read())
-        tmp_path = tmp.name
-
-    # Image
-    if suffix.lower() in (".jpg", ".jpeg", ".png"):
-        frame = cv2.imdecode(np.frombuffer(open(tmp_path, "rb").read(), np.uint8), cv2.IMREAD_COLOR)
-        _analyze_and_display(frame)
-
-    # Video
-    else:
-        cap = cv2.VideoCapture(tmp_path)
-        stframe = st.image([])
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            _analyze_and_display(frame, stframe)
-        cap.release()
-
-def _analyze_and_display(frame, placeholder=None):
-    try:
-        results = DeepFace.analyze(frame, actions=["emotion"], enforce_detection=False, silent=True)
-        emotion = results[0]["dominant_emotion"]
-        color = (0, 0, 255) if emotion in ("angry", "fear") else (0, 255, 0)
-        cv2.putText(frame, f"{emotion.upper()}", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-        log_event(emotion)
-        if emotion in ("angry", "fear"):
-            path = os.path.join(INTRUDER_DIR, f"alert_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
-            cv2.imwrite(path, frame)
-            send_email_async(path, emotion)
-            st.error(f"Alert: {emotion} detected!")
-    except Exception as e:
-        st.warning(f"Detection error: {e}")
-
-    if placeholder:
-        placeholder.image(frame, channels="BGR")
-    else:
-        st.image(frame, channels="BGR")
-# -----------------------
-# PAGE: LOGS DASHBOARD
-# -----------------------
-def dashboard_page():
-    st.title("Security Logs")
-
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        limit = st.slider("Rows to display", 10, 500, 50, step=10)
-    with col2:
-        if st.button("Clear all logs"):
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute("DELETE FROM logs")
-                conn.commit()
-            st.success("Logs cleared.")
-            st.rerun()
-
-    data = get_logs(limit)
-
-    if not data:
-        st.info("No logs found yet.")
-        return
-
-    # Emotion filter
-    emotions = sorted(set(row[0] for row in data))
-    selected = st.multiselect("Filter by emotion", emotions, default=emotions)
-    filtered = [row for row in data if row[0] in selected]
-
-    # Colour-code rows
-    for emotion, time in filtered:
-        color = "red" if emotion in ("angry", "fear") else "green"
-        st.markdown(
-            f"<span style='color:{color}'>⬤</span> &nbsp;"
-            f"**{time}** &nbsp;|&nbsp; `{emotion}`",
-            unsafe_allow_html=True
-        )
-
-    # CSV export
-    if filtered:
-        csv_lines = ["emotion,time"] + [f"{r[0]},{r[1]}" for r in filtered]
-        st.download_button(
-            "Export CSV",
-            data="\n".join(csv_lines),
-            file_name="security_logs.csv",
-            mime="text/csv"
-        )
+@app.route('/video')
+@login_required
+def video():
+    return Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 # -----------------------
-# PAGE: SETTINGS
+# RUN APP
 # -----------------------
-def settings_page():
-    st.title("Settings")
-
-    st.subheader("Change Password")
-    with st.form("change_pwd_form"):
-        current = st.text_input("Current password", type="password")
-        new_pwd = st.text_input("New password", type="password")
-        confirm = st.text_input("Confirm new password", type="password")
-        submit  = st.form_submit_button("Update Password")
-
-        if submit:
-            username = st.session_state.get("username", "admin")
-            if not verify_admin(username, current):
-                st.error("Current password is incorrect.")
-            elif new_pwd != confirm:
-                st.error("New passwords do not match.")
-            elif not is_strong_password(new_pwd):
-                st.error("Password must be at least 8 characters and contain letters and numbers.")
-            else:
-                change_password(username, new_pwd)
-                st.success("Password updated successfully.")
-
-    st.subheader("Email Configuration")
-    st.info(
-        "Set EMAIL_SENDER, EMAIL_PASSWORD, and EMAIL_RECEIVER "
-        "in a `.env` file in the project root. Restart the app after changes."
-    )
-    st.code(
-        "EMAIL_SENDER=your_email@gmail.com\n"
-        "EMAIL_PASSWORD=your_app_password\n"
-        "EMAIL_RECEIVER=receiver@gmail.com",
-        language="ini"
-    )
-
-    st.subheader("Intruder Image Cleanup")
-    if st.button(f"Delete images older than {LOG_RETENTION_DAYS} days"):
-        cleanup_old_images()
-        st.success("Old intruder images deleted.")
-
-    # Show stored images
-    images = sorted(os.listdir(INTRUDER_DIR))
-    if images:
-        st.subheader(f"Stored Intruder Images ({len(images)})")
-        cols = st.columns(3)
-        for i, fname in enumerate(images[-9:]):   # show last 9
-            fpath = os.path.join(INTRUDER_DIR, fname)
-            cols[i % 3].image(fpath, caption=fname, use_container_width=True)
-    else:
-        st.info("No intruder images stored.")
-
-# -----------------------
-# MAIN
-# -----------------------
-def main():
-    st.set_page_config(
-        page_title="Security System",
-        page_icon="🔒",
-        layout="wide"
-    )
-
-    init_db()
-
-    if "logged_in" not in st.session_state:
-        st.session_state.logged_in = False
-
-    if not st.session_state.logged_in:
-        login_page()
-        return
-
-    # Session timeout check on every interaction
-    check_session_timeout()
-
-    page = st.sidebar.radio(
-        "Navigation",
-        ["Camera Feed", "Logs Dashboard", "Settings", "Logout"]
-    )
-
-    if page == "Camera Feed":
-        camera_page()
-    elif page == "Logs Dashboard":
-        dashboard_page()
-    elif page == "Settings":
-        settings_page()
-    elif page == "Logout":
-        for key in ["logged_in", "username", "last_activity", "last_emotion", "last_alert"]:
-            st.session_state.pop(key, None)
-        st.rerun()
-
-
 if __name__ == "__main__":
-    main()
+    app.run(debug=True)
