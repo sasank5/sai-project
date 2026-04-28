@@ -5,3 +5,5 @@ numpy
 werkzeug
 python-dotenv
 tf-keras
+face_recognition
+dlib
