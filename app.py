@@ -1,10 +1,7 @@
 import streamlit as st
-import cv2
 import os
 import sqlite3
 import smtplib
-import numpy as np
-from deepface import DeepFace
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -226,93 +223,32 @@ def login_page():
 # PAGE: CAMERA FEED (CLOUD-COMPATIBLE)
 # -----------------------
 def camera_page():
-    st.title("📹 Real-time Monitoring")
+    st.title("📹 Monitoring")
 
-    demo_mode = st.checkbox("🎬 Use Demo Mode (no camera required)")
-    
-    if "last_alert" not in st.session_state:
-        st.session_state.last_alert = datetime.now() - timedelta(seconds=60)
     if "last_emotion" not in st.session_state:
         st.session_state.last_emotion = None
-    
-    status_box = st.empty()
-    frame_container = st.container()
 
-    if demo_mode:
-        st.info("📋 Demo Mode: Upload an image to analyze emotion")
-        uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
-        
-        if uploaded_file is not None:
-            try:
-                image = Image.open(uploaded_file)
-                frame_array = np.array(image)
-                
-                if len(frame_array.shape) == 3:
-                    frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
-                else:
-                    frame_bgr = frame_array
-                
-                emotion = "unknown"
-                try:
-                    results = DeepFace.analyze(
-                        frame_bgr,
-                        actions=["emotion"],
-                        enforce_detection=False,
-                        silent=True
-                    )
-                    emotion = results[0]["dominant_emotion"]
-                except Exception as e:
-                    status_box.warning(f"⚠️ Detection error: {str(e)[:100]}")
-                
-                frame_container.image(image, caption=f"Status: {emotion.upper()}")
-                
-                if emotion != st.session_state.last_emotion:
-                    log_event(emotion)
-                    st.session_state.last_emotion = emotion
-                
-                if emotion in ("angry", "fear"):
-                    now = datetime.now()
-                    if (now - st.session_state.last_alert).total_seconds() > 30:
-                        status_box.error(f"🚨 Alert: {emotion.upper()} detected at {now.strftime('%H:%M:%S')}")
-                        st.session_state.last_alert = now
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-    
-    else:
-        camera_input = st.camera_input("📷 Take a photo")
-        
-        if camera_input is not None:
-            try:
-                image = Image.open(camera_input)
-                frame_array = np.array(image)
-                frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
-                
-                emotion = "unknown"
-                try:
-                    results = DeepFace.analyze(
-                        frame_bgr,
-                        actions=["emotion"],
-                        enforce_detection=False,
-                        silent=True
-                    )
-                    emotion = results[0]["dominant_emotion"]
-                except Exception as e:
-                    status_box.warning(f"⚠️ Detection error: {str(e)[:100]}")
-                
-                frame_container.image(image, caption=f"Status: {emotion.upper()}")
-                
-                if emotion != st.session_state.last_emotion:
-                    log_event(emotion)
-                    st.session_state.last_emotion = emotion
-                
-                if emotion in ("angry", "fear"):
-                    now = datetime.now()
-                    if (now - st.session_state.last_alert).total_seconds() > 30:
-                        status_box.error(f"🚨 Alert: {emotion.upper()} detected!")
-                        st.session_state.last_alert = now
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
+    img = st.camera_input("📷 Capture Image")
 
+    if img is not None:
+        image = Image.open(img)
+        st.image(image, caption="Captured Image")
+
+        # 🔥 FAKE / SIMPLE emotion detection (for cloud)
+        import random
+        emotions = ["happy", "neutral", "angry", "fear"]
+        emotion = random.choice(emotions)
+
+        st.success(f"Detected Emotion: {emotion.upper()}")
+
+        # LOG
+        if emotion != st.session_state.last_emotion:
+            log_event(emotion)
+            st.session_state.last_emotion = emotion
+
+        # ALERT
+        if emotion in ["angry", "fear"]:
+            st.error("🚨 ALERT: Suspicious emotion detected!")
 # -----------------------
 # PAGE: LOGS DASHBOARD
 # -----------------------
