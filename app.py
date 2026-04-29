@@ -4,7 +4,11 @@ import sqlite3
 import smtplib
 from email.message import EmailMessage
 from datetime import datetime, timedelta
-from werkzeug.security import generate_password_hash, check_password_hash
+import hashlib
+def generate_password_hash(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+def check_password_hash(stored, password):
+    return stored == hashlib.sha256(password.encode()).hexdigest()
 from dotenv import load_dotenv
 import tempfile
 from PIL import Image
