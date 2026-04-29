@@ -2,3 +2,5 @@ streamlit
 numpy<2
 pillow
 python-dotenv
+streamlit
+pillow
